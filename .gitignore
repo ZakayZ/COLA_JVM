@@ -1,0 +1,26 @@
+# CMake build trees and in-source artifacts
+/build/
+/build-*/
+/cmake-build-*/
+/CMakeCache.txt
+/CMakeFiles/
+/CTestTestfile.cmake
+/DartConfiguration.tcl
+/Makefile
+/cmake_install.cmake
+/compile_commands.json
+/install_manifest.txt
+/_deps/
+
+# Java, Kotlin, and Gradle outputs
+**/.gradle/
+**/build/
+/target/
+*.class
+hs_err_pid*.log
+
+# IDE, tooling, and OS metadata
+/.cache/
+/.idea/
+/.vscode/
+.DS_Store
