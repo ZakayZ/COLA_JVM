@@ -91,7 +91,7 @@ target_include_directories(
 target_link_libraries(
     ${COLA_MODULE_NAME}
     PUBLIC COLA
-    PRIVATE ${JNI_LIBRARIES} ${CMAKE_DL_LIBS}
+    PRIVATE ${JAVA_JVM_LIBRARY} ${CMAKE_DL_LIBS}
 )
 set_target_properties(
     ${COLA_MODULE_NAME}
