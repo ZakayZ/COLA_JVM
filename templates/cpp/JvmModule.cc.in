@@ -1,0 +1,42 @@
+#include "COLA_JVM/JvmFilters.hh"
+
+#include <dlfcn.h>
+
+#include <filesystem>
+#include <memory>
+#include <stdexcept>
+#include <string>
+
+namespace {
+
+  const std::string& JarPath() {
+    static const std::string path = [] {
+      Dl_info information{};
+      if (dladdr(reinterpret_cast<const void*>(&JarPath), &information) == 0 || information.dli_fname == nullptr) {
+        throw std::runtime_error("COLA JVM module could not resolve its native library path");
+      }
+
+      return (std::filesystem::canonical(information.dli_fname).parent_path() / "@JAR_FILENAME@").string();
+    }();
+    return path;
+  }
+
+  template <typename Factory>
+  void AddFactory(cola::FactoryMap& factories, const std::string& jar, const std::string& name,
+                  const std::string& class_name) {
+    factories.emplace(name, std::make_unique<Factory>(name, jar, class_name));
+  }
+
+  class JvmModule final : public cola::VModule {
+   private:
+    cola::FactoryMap DoGetModuleFilters() const override {
+      cola::FactoryMap factories;
+      const std::string& jar = JarPath();
+@FACTORY_REGISTRATIONS@
+      return factories;
+    }
+  };
+
+}  // namespace
+
+extern "C" cola::VModule* LoadCOLAModule() { return new JvmModule(); }

@@ -5,7 +5,7 @@
 #include <jni_bind_release.h>
 
 #include <cstdint>
-#include <mutex>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -15,78 +15,24 @@ namespace cola::jvm {
 
     using detail::ThrowIfJavaException;
 
-    struct GeneratorFilter final {};
-    struct ConverterFilter final {};
-    struct UnsafeGeneratorFilter final {};
-    struct UnsafeConverterFilter final {};
-    struct WriterFilter final {};
-
     constexpr auto kEventData = jni::Class{
         "org/cola/api/EventData", jni::Static{jni::Method{"ownNative", jni::Return{jni::Self{}}, jni::Params{jlong{}}}},
         jni::Method{"releaseToNative", jni::Return{jlong{}}}, jni::Method{"nativeAddress", jni::Return{jlong{}}}};
 
-    template <typename Filter>
-    struct FilterDefinition;
+    // Same order as Bridge.Kind.
+    enum class FilterKind : jint { kGenerator, kConverter, kUnsafeGenerator, kUnsafeConverter, kWriter };
 
-    template <>
-    struct FilterDefinition<GeneratorFilter> final {
-      static constexpr auto kCls =
-          jni::Class{"org/cola/api/Generator", jni::Method{"generate", jni::Return{kEventData}}};
-      static constexpr auto kLoaderMethod = jni::metaprogramming::StringLiteral{"loadGenerator"};
-      static constexpr auto kLoader = jni::Method{kLoaderMethod.value, jni::Return{kCls}};
-    };
-
-    template <>
-    struct FilterDefinition<ConverterFilter> final {
-      static constexpr auto kCls = jni::Class{"org/cola/api/Converter",
-                                              jni::Method{"convert", jni::Return{kEventData}, jni::Params{kEventData}}};
-      static constexpr auto kLoaderMethod = jni::metaprogramming::StringLiteral{"loadConverter"};
-      static constexpr auto kLoader = jni::Method{kLoaderMethod.value, jni::Return{kCls}};
-    };
-
-    template <>
-    struct FilterDefinition<UnsafeGeneratorFilter> final {
-      static constexpr auto kCls =
-          jni::Class{"org/cola/api/UnsafeGenerator", jni::Method{"generate", jni::Return{kEventData}}};
-      static constexpr auto kLoaderMethod = jni::metaprogramming::StringLiteral{"loadUnsafeGenerator"};
-      static constexpr auto kLoader = jni::Method{kLoaderMethod.value, jni::Return{kCls}};
-    };
-
-    template <>
-    struct FilterDefinition<UnsafeConverterFilter> final {
-      static constexpr auto kCls = jni::Class{"org/cola/api/UnsafeConverter",
-                                              jni::Method{"convert", jni::Return{kEventData}, jni::Params{kEventData}}};
-      static constexpr auto kLoaderMethod = jni::metaprogramming::StringLiteral{"loadUnsafeConverter"};
-      static constexpr auto kLoader = jni::Method{kLoaderMethod.value, jni::Return{kCls}};
-    };
-
-    template <>
-    struct FilterDefinition<WriterFilter> final {
-      static constexpr auto kCls =
-          jni::Class{"org/cola/api/Writer", jni::Method{"write", jni::Return{}, jni::Params{kEventData}}};
-      static constexpr auto kLoaderMethod = jni::metaprogramming::StringLiteral{"loadWriter"};
-      static constexpr auto kLoader = jni::Method{kLoaderMethod.value, jni::Return{kCls}};
-    };
-
+    constexpr auto kFilterHandle =
+        jni::Class{"org/cola/api/internal/Bridge$FilterHandle",
+                   jni::Method{"process", jni::Return{kEventData}, jni::Params{kEventData}},
+                   jni::Method{"lastCallbackNanoseconds", jni::Return{jlong{}}}, jni::Method{"close", jni::Return{}}};
     constexpr auto kFilterLoader =
-        jni::Class{"org/cola/api/internal/Bridge$FilterLoader",
-                   jni::Constructor{jstring{}, jstring{}},
+        jni::Class{"org/cola/api/internal/Bridge$FilterLoader", jni::Constructor{},
                    jni::Method{"putMetadata", jni::Return{}, jni::Params{jstring{}, jstring{}}},
-                   FilterDefinition<GeneratorFilter>::kLoader,
-                   FilterDefinition<ConverterFilter>::kLoader,
-                   FilterDefinition<UnsafeGeneratorFilter>::kLoader,
-                   FilterDefinition<UnsafeConverterFilter>::kLoader,
-                   FilterDefinition<WriterFilter>::kLoader};
+                   jni::Method{"load", jni::Return{kFilterHandle}, jni::Params{jint{}}}};
     constexpr auto kBridge =
         jni::Class{"org/cola/api/internal/Bridge",
                    jni::Static{jni::Method{"loadNativeLibrary", jni::Return{}, jni::Params{jstring{}}}}};
-
-    std::string RequireMetadata(const std::unordered_map<std::string, std::string>& metadata, const std::string& key) {
-      if (const auto value = metadata.find(key); value != metadata.end() && !value->second.empty()) {
-        return value->second;
-      }
-      throw std::invalid_argument(std::string("JVM filter requires a non-empty '") + key + "' XML attribute");
-    }
 
     void RequireJavaObject(JNIEnv& env, const jni::RefBase<jobject>& object, const std::string& context) {
       ThrowIfJavaException(env, context);
@@ -102,47 +48,51 @@ namespace cola::jvm {
       }
     }
 
-    void EnsureNativeLibraryLoaded(JNIEnv& env) {
-      static std::once_flag loaded;
-      std::call_once(loaded, [&env] {
-        jni::StaticRef<kBridge>{}.Call<"loadNativeLibrary">(detail::NativeLibraryPath().string());
-        ThrowIfJavaException(env, "registering the COLA JVM native proxy library");
-      });
-    }
-
-    template <typename Filter>
-    jni::GlobalObject<FilterDefinition<Filter>::kCls> LoadFilter(
-        detail::JvmRuntime& runtime, const std::unordered_map<std::string, std::string>& metadata) {
+    jni::GlobalObject<kFilterHandle> LoadFilter(detail::JvmRuntime& runtime,
+                                                const std::unordered_map<std::string, std::string>& metadata,
+                                                FilterKind kind) {
       auto& env = runtime.Env();
-      EnsureNativeLibraryLoaded(env);
+      jni::StaticRef<kBridge>{}.Call<"loadNativeLibrary">(detail::NativeLibraryPath().string());
+      ThrowIfJavaException(env, "registering the COLA JVM native proxy library");
 
-      const auto class_name = RequireMetadata(metadata, "class");
-      auto loader = jni::LocalObject<kFilterLoader>{RequireMetadata(metadata, "jar"), class_name};
-      ThrowIfJavaException(env, "creating JVM filter loader");
-
+      auto loader = jni::LocalObject<kFilterLoader>{};
+      RequireJavaObject(env, loader, "creating JVM filter loader");
       for (const auto& [key, value] : metadata) {
         loader.Call<"putMetadata">(key, value);
         ThrowIfJavaException(env, "inserting JVM filter metadata");
       }
 
-      auto filter = loader.template Call<FilterDefinition<Filter>::kLoaderMethod>();
-      RequireJavaObject(env, filter, "loading JVM filter " + class_name);
-
-      auto object = jni::GlobalObject<FilterDefinition<Filter>::kCls>{jni::PromoteToGlobal{}, filter.Release()};
-      RequireJavaObject(env, object, "retaining JVM filter instance");
-
+      auto filter = loader.Call<"load">(static_cast<jint>(kind));
+      RequireJavaObject(env, filter, "loading JVM filter");
+      auto object = jni::GlobalObject<kFilterHandle>{jni::PromoteToGlobal{}, filter.Release()};
+      RequireJavaObject(env, object, "retaining JVM filter handle");
       return object;
     }
 
-    template <typename Filter>
+    template <FilterKind Kind>
     struct FilterImpl {
       explicit FilterImpl(const std::unordered_map<std::string, std::string>& metadata)
-          : runtime(detail::JvmRuntime::Instance()), object(LoadFilter<Filter>(runtime, metadata)) {}
+          : runtime(detail::JvmRuntime::Instance()), object(LoadFilter(runtime, metadata, Kind)) {}
 
-      ~FilterImpl() { static_cast<void>(runtime.Env()); }
+      ~FilterImpl() {
+        try {
+          auto& env = runtime.Env();
+          object.Call<"close">();
+          ThrowIfJavaException(env, "closing JVM filter");
+        } catch (const std::exception& error) {
+          std::cerr << error.what() << '\n';
+        }
+      }
 
       detail::JvmRuntime& runtime;
-      jni::GlobalObject<FilterDefinition<Filter>::kCls> object;
+      jni::GlobalObject<kFilterHandle> object;
+
+      std::uint64_t LastCallbackNanoseconds() {
+        auto& env = runtime.Env();
+        auto value = object.Call<"lastCallbackNanoseconds">();
+        ThrowIfJavaException(env, "reading JVM converter callback time");
+        return static_cast<std::uint64_t>(value);
+      }
     };
 
     jlong EventAddress(const EventData* event) {
@@ -169,23 +119,23 @@ namespace cola::jvm {
 
   }  // namespace
 
-  struct JvmGenerator::Impl final : FilterImpl<GeneratorFilter> {
+  struct JvmGenerator::Impl final : FilterImpl<FilterKind::kGenerator> {
     using FilterImpl::FilterImpl;
   };
 
-  struct JvmConverter::Impl final : FilterImpl<ConverterFilter> {
+  struct JvmConverter::Impl final : FilterImpl<FilterKind::kConverter> {
     using FilterImpl::FilterImpl;
   };
 
-  struct JvmUnsafeGenerator::Impl final : FilterImpl<UnsafeGeneratorFilter> {
+  struct JvmUnsafeGenerator::Impl final : FilterImpl<FilterKind::kUnsafeGenerator> {
     using FilterImpl::FilterImpl;
   };
 
-  struct JvmUnsafeConverter::Impl final : FilterImpl<UnsafeConverterFilter> {
+  struct JvmUnsafeConverter::Impl final : FilterImpl<FilterKind::kUnsafeConverter> {
     using FilterImpl::FilterImpl;
   };
 
-  struct JvmWriter::Impl final : FilterImpl<WriterFilter> {
+  struct JvmWriter::Impl final : FilterImpl<FilterKind::kWriter> {
     using FilterImpl::FilterImpl;
   };
 
@@ -197,7 +147,7 @@ namespace cola::jvm {
   std::unique_ptr<EventData> JvmGenerator::operator()() {
     auto& env = impl_->runtime.Env();
 
-    auto result = impl_->object.Call<"generate">();
+    auto result = impl_->object.Call<"process">(jni::LocalObject<kEventData>{nullptr});
     RequireJavaObject(env, result, "running JVM generator");
 
     const auto address = result.Call<"nativeAddress">();
@@ -214,7 +164,7 @@ namespace cola::jvm {
   std::unique_ptr<EventData> JvmConverter::operator()(std::unique_ptr<EventData>&& data) {
     auto& env = impl_->runtime.Env();
 
-    auto result = impl_->object.Call<"convert">(MoveEventToJava(env, std::move(data)));
+    auto result = impl_->object.Call<"process">(MoveEventToJava(env, std::move(data)));
     RequireJavaObject(env, result, "running JVM converter");
 
     const auto address = result.Call<"nativeAddress">();
@@ -222,6 +172,8 @@ namespace cola::jvm {
 
     return CopyEvent(address);
   }
+
+  std::uint64_t JvmConverter::LastCallbackNanoseconds() const { return impl_->LastCallbackNanoseconds(); }
 
   JvmUnsafeGenerator::JvmUnsafeGenerator(const std::unordered_map<std::string, std::string>& metadata)
       : impl_(std::make_unique<Impl>(metadata)) {}
@@ -231,7 +183,7 @@ namespace cola::jvm {
   std::unique_ptr<EventData> JvmUnsafeGenerator::operator()() {
     auto& env = impl_->runtime.Env();
 
-    auto result = impl_->object.Call<"generate">();
+    auto result = impl_->object.Call<"process">(jni::LocalObject<kEventData>{nullptr});
     RequireJavaObject(env, result, "running unsafe JVM generator");
 
     const auto address = result.Call<"releaseToNative">();
@@ -248,7 +200,7 @@ namespace cola::jvm {
   std::unique_ptr<EventData> JvmUnsafeConverter::operator()(std::unique_ptr<EventData>&& data) {
     auto& env = impl_->runtime.Env();
 
-    auto result = impl_->object.Call<"convert">(MoveEventToJava(env, std::move(data)));
+    auto result = impl_->object.Call<"process">(MoveEventToJava(env, std::move(data)));
     RequireJavaObject(env, result, "running unsafe JVM converter");
 
     const auto address = result.Call<"releaseToNative">();
@@ -257,6 +209,8 @@ namespace cola::jvm {
     return TakeEvent(address);
   }
 
+  std::uint64_t JvmUnsafeConverter::LastCallbackNanoseconds() const { return impl_->LastCallbackNanoseconds(); }
+
   JvmWriter::JvmWriter(const std::unordered_map<std::string, std::string>& metadata)
       : impl_(std::make_unique<Impl>(metadata)) {}
 
@@ -264,7 +218,7 @@ namespace cola::jvm {
 
   void JvmWriter::operator()(std::unique_ptr<EventData>&& data) {
     auto& env = impl_->runtime.Env();
-    impl_->object.Call<"write">(MoveEventToJava(env, std::move(data)));
+    impl_->object.Call<"process">(MoveEventToJava(env, std::move(data)));
     ThrowIfJavaException(env, "running JVM writer");
   }
 
