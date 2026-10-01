@@ -8,7 +8,10 @@
 namespace cola::jvm::detail {
   namespace {
 
-    constexpr auto kThrowable = jni::Class{"java/lang/Throwable", jni::Method{"toString", jni::Return{jstring{}}}};
+    constexpr auto kThrowable = jni::Class{"java/lang/Throwable"};
+    constexpr auto kBridge =
+        jni::Class{"org/cola/api/internal/Bridge",
+                   jni::Static{jni::Method{"formatException", jni::Return{jstring{}}, jni::Params{kThrowable}}}};
 
     std::filesystem::path ApiJarPath() {
       if (const auto* value = std::getenv("COLA_JVM_API_JAR"); value != nullptr && *value != '\0') {
@@ -40,10 +43,11 @@ namespace cola::jvm::detail {
       if (auto* exception = env.ExceptionOccurred(); exception != nullptr) {
         env.ExceptionClear();
 
-        auto text = jni::LocalObject<kThrowable>{jni::AdoptLocal{}, static_cast<jobject>(exception)}.Call<"toString">();
+        auto throwable = jni::LocalObject<kThrowable>{jni::AdoptLocal{}, static_cast<jobject>(exception)};
+        auto text = jni::StaticRef<kBridge>{}.Call<"formatException">(throwable);
         if (env.ExceptionCheck() == JNI_TRUE) {
           env.ExceptionClear();
-          return "Java exception (toString failed)";
+          return "Java exception (formatting failed)";
         }
         if (static_cast<jstring>(text) == nullptr) {
           return "Java exception";

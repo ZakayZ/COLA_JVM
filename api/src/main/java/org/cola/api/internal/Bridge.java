@@ -1,11 +1,16 @@
 package org.cola.api.internal;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import org.cola.api.Converter;
+import org.cola.api.EventData;
 import org.cola.api.Generator;
 import org.cola.api.UnsafeConverter;
 import org.cola.api.UnsafeGenerator;
@@ -23,59 +28,113 @@ public final class Bridge {
         }
     }
 
+    public static String formatException(Throwable exception) {
+        var text = new StringWriter();
+        exception.printStackTrace(new PrintWriter(text));
+        return text.toString();
+    }
+
+    /** Internal protocol shared with the native adapter; not user filter registration. */
+    private enum Kind {
+        GENERATOR(Generator.class),
+        CONVERTER(Converter.class),
+        UNSAFE_GENERATOR(UnsafeGenerator.class),
+        UNSAFE_CONVERTER(UnsafeConverter.class),
+        WRITER(Writer.class);
+
+        private final Class<?> type;
+
+        Kind(Class<?> type) {
+            this.type = type;
+        }
+    }
+
     public static final class FilterLoader {
-        private final String jarPath;
-        private final String className;
         private final Map<String, String> metadata = new HashMap<>();
 
-        public FilterLoader(String jarPath, String className) {
-            this.jarPath = jarPath;
-            this.className = className;
-        }
+        public FilterLoader() {}
 
         public void putMetadata(String key, String value) {
             metadata.put(key, value);
         }
 
-        public Generator loadGenerator() throws Exception {
-            return load(Generator.class);
+        private String required(String key) {
+            String value = metadata.get(key);
+            if (value == null || value.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "JVM filter requires a non-empty '" + key + "' XML attribute");
+            }
+            return value;
         }
 
-        public Converter loadConverter() throws Exception {
-            return load(Converter.class);
-        }
-
-        public UnsafeGenerator loadUnsafeGenerator() throws Exception {
-            return load(UnsafeGenerator.class);
-        }
-
-        public UnsafeConverter loadUnsafeConverter() throws Exception {
-            return load(UnsafeConverter.class);
-        }
-
-        public Writer loadWriter() throws Exception {
-            return load(Writer.class);
-        }
-
-        private <T> T load(Class<T> interfaceType) throws Exception {
-            return Bridge.load(jarPath, className, metadata, interfaceType);
+        public FilterHandle load(int kindIndex) throws Throwable {
+            Kind kind = Kind.values()[kindIndex];
+            String className = required("class");
+            var loader = new URLClassLoader(
+                    new URL[] {Path.of(required("jar")).toAbsolutePath().toUri().toURL()},
+                    Bridge.class.getClassLoader());
+            try {
+                Class<?> implementation = Class.forName(className, true, loader);
+                implementation.asSubclass(kind.type);
+                Object filter;
+                try {
+                    filter = implementation.getConstructor(Map.class).newInstance(metadata);
+                } catch (NoSuchMethodException ignored) {
+                    filter = implementation.getConstructor().newInstance();
+                }
+                return new FilterHandle(kind, filter, loader);
+            } catch (Throwable failure) {
+                Throwable cause = failure instanceof InvocationTargetException
+                        ? ((InvocationTargetException) failure).getTargetException() : failure;
+                try {
+                    loader.close();
+                } catch (Throwable closing) {
+                    cause.addSuppressed(closing);
+                }
+                throw cause;
+            }
         }
     }
 
-    private static <T> T load(
-            String jarPath, String className, Map<String, String> metadata, Class<T> interfaceType)
-            throws Exception {
-        Class<?> implementation =
-                Class.forName(
-                        className,
-                        true,
-                        new URLClassLoader(
-                                new URL[] {Path.of(jarPath).toAbsolutePath().toUri().toURL()},
-                                Bridge.class.getClassLoader()));
-        try {
-            return interfaceType.cast(implementation.getConstructor(Map.class).newInstance(metadata));
-        } catch (NoSuchMethodException ignored) {
-            return interfaceType.cast(implementation.getConstructor().newInstance());
+    /** Keeps the implementation and its loader alive until the native handle closes. */
+    public static final class FilterHandle implements AutoCloseable {
+        private final Kind kind;
+        private final URLClassLoader loader;
+        private Object filter;
+
+        private FilterHandle(Kind kind, Object filter, URLClassLoader loader) {
+            this.kind = kind;
+            this.filter = filter;
+            this.loader = loader;
+        }
+
+        public EventData process(EventData event) {
+            Object instance = Objects.requireNonNull(filter, "Filter is closed");
+            return switch (kind) {
+                case GENERATOR, UNSAFE_GENERATOR ->
+                    Objects.requireNonNull(((Generator) instance).generate(), "Generator returned null");
+                case CONVERTER, UNSAFE_CONVERTER ->
+                    Objects.requireNonNull(((Converter) instance).convert(event), "Converter returned null");
+                case WRITER -> {
+                    ((Writer) instance).write(event);
+                    yield null;
+                }
+            };
+        }
+
+        @Override
+        public void close() throws Exception {
+            Object instance = filter;
+            if (instance == null) {
+                return;
+            }
+            filter = null;
+            // Close the loader even if user cleanup fails, preserving both exceptions.
+            try (var resource = loader) {
+                if (instance instanceof AutoCloseable closeable) {
+                    closeable.close();
+                }
+            }
         }
     }
 }
