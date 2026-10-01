@@ -22,12 +22,11 @@ namespace cola::jvm {
     std::unique_ptr<Impl> impl_;
   };
 
-  class JvmConverter final : public VConverter, public VTimedConverter {
+  class JvmConverter final : public VConverter {
    public:
     explicit JvmConverter(const std::unordered_map<std::string, std::string>& metadata);
     ~JvmConverter() override;
     std::unique_ptr<EventData> operator()(std::unique_ptr<EventData>&& data) override;
-    std::uint64_t LastCallbackNanoseconds() const override;
     inline static const std::string kName{"jvm_converter"};
 
    private:
@@ -47,12 +46,11 @@ namespace cola::jvm {
     std::unique_ptr<Impl> impl_;
   };
 
-  class JvmUnsafeConverter final : public VConverter, public VTimedConverter {
+  class JvmUnsafeConverter final : public VConverter {
    public:
     explicit JvmUnsafeConverter(const std::unordered_map<std::string, std::string>& metadata);
     ~JvmUnsafeConverter() override;
     std::unique_ptr<EventData> operator()(std::unique_ptr<EventData>&& data) override;
-    std::uint64_t LastCallbackNanoseconds() const override;
     inline static const std::string kName{"jvm_unsafe_converter"};
 
    private:

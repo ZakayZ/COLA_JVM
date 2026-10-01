@@ -101,7 +101,6 @@ public final class Bridge {
         private final Kind kind;
         private final URLClassLoader loader;
         private Object filter;
-        private long lastCallbackNanoseconds;
 
         private FilterHandle(Kind kind, Object filter, URLClassLoader loader) {
             this.kind = kind;
@@ -114,27 +113,13 @@ public final class Bridge {
             return switch (kind) {
                 case GENERATOR, UNSAFE_GENERATOR ->
                     Objects.requireNonNull(((Generator) instance).generate(), "Generator returned null");
-                case CONVERTER, UNSAFE_CONVERTER -> processConverter((Converter) instance, event);
+                case CONVERTER, UNSAFE_CONVERTER ->
+                    Objects.requireNonNull(((Converter) instance).convert(event), "Converter returned null");
                 case WRITER -> {
                     ((Writer) instance).write(event);
                     yield null;
                 }
             };
-        }
-
-        public long lastCallbackNanoseconds() {
-            return lastCallbackNanoseconds;
-        }
-
-        private EventData processConverter(Converter converter, EventData event) {
-            long start = System.nanoTime();
-            EventData result;
-            try {
-                result = converter.convert(event);
-            } finally {
-                lastCallbackNanoseconds = System.nanoTime() - start;
-            }
-            return Objects.requireNonNull(result, "Converter returned null");
         }
 
         @Override

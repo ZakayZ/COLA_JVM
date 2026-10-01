@@ -25,7 +25,7 @@ namespace cola::jvm {
     constexpr auto kFilterHandle =
         jni::Class{"org/cola/api/internal/Bridge$FilterHandle",
                    jni::Method{"process", jni::Return{kEventData}, jni::Params{kEventData}},
-                   jni::Method{"lastCallbackNanoseconds", jni::Return{jlong{}}}, jni::Method{"close", jni::Return{}}};
+                   jni::Method{"close", jni::Return{}}};
     constexpr auto kFilterLoader =
         jni::Class{"org/cola/api/internal/Bridge$FilterLoader", jni::Constructor{},
                    jni::Method{"putMetadata", jni::Return{}, jni::Params{jstring{}, jstring{}}},
@@ -87,12 +87,6 @@ namespace cola::jvm {
       detail::JvmRuntime& runtime;
       jni::GlobalObject<kFilterHandle> object;
 
-      std::uint64_t LastCallbackNanoseconds() {
-        auto& env = runtime.Env();
-        auto value = object.Call<"lastCallbackNanoseconds">();
-        ThrowIfJavaException(env, "reading JVM converter callback time");
-        return static_cast<std::uint64_t>(value);
-      }
     };
 
     jlong EventAddress(const EventData* event) {
@@ -173,8 +167,6 @@ namespace cola::jvm {
     return CopyEvent(address);
   }
 
-  std::uint64_t JvmConverter::LastCallbackNanoseconds() const { return impl_->LastCallbackNanoseconds(); }
-
   JvmUnsafeGenerator::JvmUnsafeGenerator(const std::unordered_map<std::string, std::string>& metadata)
       : impl_(std::make_unique<Impl>(metadata)) {}
 
@@ -208,8 +200,6 @@ namespace cola::jvm {
 
     return TakeEvent(address);
   }
-
-  std::uint64_t JvmUnsafeConverter::LastCallbackNanoseconds() const { return impl_->LastCallbackNanoseconds(); }
 
   JvmWriter::JvmWriter(const std::unordered_map<std::string, std::string>& metadata)
       : impl_(std::make_unique<Impl>(metadata)) {}
